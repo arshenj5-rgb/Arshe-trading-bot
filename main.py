@@ -5,18 +5,18 @@ from config import settings
 from client import DerivClient
 
 
+def get_symbol(item):
+    return (
+        item.get("underlying_symbol")
+        or item.get("symbol")
+        or ""
+    )
+
+
 async def run():
     print("=" * 60)
-    print("ARSHE TRADING BOT")
-    print("Deriv market-analysis engine")
+    print("ARSHE TRADING BOT - DERIV MARKET DATA TEST")
     print("=" * 60)
-
-    print(f"WebSocket: {settings.deriv_ws_url}")
-    print(f"Requested symbol: {settings.symbol}")
-    print(f"Timeframes: {settings.timeframes}")
-    print(f"History count: {settings.history_count}")
-    print(f"Minimum confidence: {settings.min_confidence}")
-    print()
 
     client = DerivClient(
         settings.deriv_ws_url,
@@ -24,9 +24,6 @@ async def run():
     )
 
     try:
-        # ---------------------------------------------------------
-        # 1. CONNECT
-        # ---------------------------------------------------------
         print("Connecting to Deriv market data...")
 
         await client.connect()
@@ -35,167 +32,257 @@ async def run():
         print()
 
         # ---------------------------------------------------------
-        # 2. GET ACTIVE SYMBOLS
+        # GET ACTIVE SYMBOLS
         # ---------------------------------------------------------
-        print("Checking Deriv active symbols...")
 
-        symbols = await client.active_symbols()
+        print("Requesting active symbols...")
+
+        response = await client.request({
+            "active_symbols": "brief",
+            "product_type": "basic",
+        })
+
+        symbols = response.get("active_symbols", [])
 
         print(
-            f"Received {len(symbols)} active symbols."
+            f"Deriv returned {len(symbols)} active symbols."
         )
-
-        if symbols:
-            print("Sample active symbols:")
-
-            shown = 0
-
-            for item in symbols:
-                symbol = (
-                    item.get("underlying_symbol")
-                    or item.get("symbol")
-                    or ""
-                )
-
-                name = (
-                    item.get("underlying_symbol_name")
-                    or item.get("display_name")
-                    or ""
-                )
-
-                if symbol:
-                    print(
-                        f"  {symbol}"
-                        + (f" - {name}" if name else "")
-                    )
-
-                    shown += 1
-
-                    if shown >= 10:
-                        break
-
         print()
 
-        # ---------------------------------------------------------
-        # 3. RESOLVE SYMBOL
-        # ---------------------------------------------------------
-        symbol = await client.resolve_symbol(
-            settings.symbol
-        )
-
-        print()
-        print(f"Using symbol: {symbol}")
-        print()
+        if not symbols:
+            raise RuntimeError(
+                "Deriv returned zero active symbols."
+            )
 
         # ---------------------------------------------------------
-        # 4. TEST TICK DATA
+        # PRINT EVERY SYMBOL
         # ---------------------------------------------------------
-        print("Testing live tick data...")
 
-        async with asyncio.timeout(15):
-            async for message in client.stream_ticks(symbol):
+        print("=" * 60)
+        print("AVAILABLE DERIV SYMBOLS")
+        print("=" * 60)
 
-                if message.get("msg_type") == "tick":
-                    tick = message.get("tick", {})
+        valid_symbols = []
 
-                    quote = tick.get("quote")
-                    epoch = tick.get("epoch")
+        for item in symbols:
+            symbol = get_symbol(item)
 
-                    print(
-                        f"Live tick: {quote} "
-                        f"(epoch={epoch})"
-                    )
+            if not symbol:
+                continue
 
-                    break
+            name = (
+                item.get("underlying_symbol_name")
+                or item.get("display_name")
+                or ""
+            )
 
-        print("Live tick stream is working.")
-        print()
-
-        # ---------------------------------------------------------
-        # 5. GET HISTORICAL CANDLES
-        # ---------------------------------------------------------
-        print("Downloading historical candles...")
-
-        for timeframe in settings.timeframes:
+            market = item.get("market", "")
+            subgroup = item.get("subgroup", "")
 
             print(
-                f"Fetching {timeframe}-second candles..."
+                f"{symbol}"
+                f" | {name}"
+                f" | market={market}"
+                f" | subgroup={subgroup}"
             )
 
-            candles = await client.candles(
-                symbol=symbol,
-                granularity=timeframe,
-                count=settings.history_count,
-            )
+            valid_symbols.append({
+                "symbol": symbol,
+                "name": name,
+                "market": market,
+                "subgroup": subgroup,
+            })
 
+        print("=" * 60)
+        print()
+
+        # ---------------------------------------------------------
+        # FIND VOLATILITY / SYNTHETIC SYMBOLS
+        # ---------------------------------------------------------
+
+        volatility = []
+
+        for item in valid_symbols:
+            text = (
+                f"{item['symbol']} "
+                f"{item['name']} "
+                f"{item['market']} "
+                f"{item['subgroup']}"
+            ).lower()
+
+            if (
+                "volatility" in text
+                or item["symbol"].startswith("1HZ")
+                or item["symbol"].startswith("R_")
+            ):
+                volatility.append(item)
+
+        print("=" * 60)
+        print("VOLATILITY / SYNTHETIC CANDIDATES")
+        print("=" * 60)
+
+        for item in volatility:
             print(
-                f"Received {len(candles)} candles "
-                f"for {timeframe}s timeframe."
+                f"{item['symbol']} - {item['name']}"
             )
 
-            if candles:
-                latest = candles[-1]
+        print("=" * 60)
+        print()
 
+        # ---------------------------------------------------------
+        # SELECT SYMBOL
+        # ---------------------------------------------------------
+
+        requested = settings.symbol.upper()
+
+        selected = None
+
+        # First: exact requested symbol.
+        for item in valid_symbols:
+            if item["symbol"].upper() == requested:
+                selected = item
+                break
+
+        # If requested symbol is unavailable, choose a volatility
+        # symbol returned by Deriv.
+        if selected is None and volatility:
+            selected = volatility[0]
+
+        # Otherwise use the first valid market.
+        if selected is None:
+            selected = valid_symbols[0]
+
+        symbol = selected["symbol"]
+
+        print(
+            f"SELECTED SYMBOL: {symbol}"
+        )
+
+        print(
+            f"NAME: {selected['name']}"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # TEST TICKS
+        # ---------------------------------------------------------
+
+        print(
+            f"Testing live ticks for {symbol}..."
+        )
+
+        self_req_id = 9001
+
+        await client.ws.send(
+            __import__("json").dumps({
+                "ticks": symbol,
+                "subscribe": 1,
+                "req_id": self_req_id,
+            })
+        )
+
+        while True:
+            raw = await asyncio.wait_for(
+                client.ws.recv(),
+                timeout=15
+            )
+
+            msg = __import__("json").loads(raw)
+
+            if msg.get("req_id") != self_req_id:
+                continue
+
+            if "error" in msg:
+                error = msg["error"]
+
+                raise RuntimeError(
+                    f"Deriv rejected symbol {symbol}: "
+                    f"{error.get('code')}: "
+                    f"{error.get('message')}"
+                )
+
+            if msg.get("msg_type") == "tick":
+                tick = msg.get("tick", {})
+
+                print()
+                print("=" * 60)
+                print("LIVE MARKET DATA WORKING")
+                print("=" * 60)
                 print(
-                    f"Latest candle: "
-                    f"O={latest['open']} "
-                    f"H={latest['high']} "
-                    f"L={latest['low']} "
-                    f"C={latest['close']}"
+                    f"Symbol: {tick.get('symbol', symbol)}"
                 )
+                print(
+                    f"Quote: {tick.get('quote')}"
+                )
+                print(
+                    f"Epoch: {tick.get('epoch')}"
+                )
+                print("=" * 60)
 
-            print()
+                break
 
         # ---------------------------------------------------------
-        # 6. BOT STATUS
+        # TEST HISTORICAL DATA
         # ---------------------------------------------------------
-        print("=" * 60)
-        print("DERIV CONNECTION TEST PASSED")
-        print("=" * 60)
-        print()
-        print(f"Symbol: {symbol}")
-        print("WebSocket: OK")
-        print("Active symbols: OK")
-        print("Ticks: OK")
-        print("Historical candles: OK")
+
         print()
         print(
-            "The market-data engine is ready."
+            f"Downloading candles for {symbol}..."
+        )
+
+        candles = await client.candles(
+            symbol=symbol,
+            granularity=60,
+            count=100,
+        )
+
+        print(
+            f"Received {len(candles)} candles."
+        )
+
+        if candles:
+            print(
+                "Latest candle:"
+            )
+
+            print(
+                candles[-1]
+            )
+
+        print()
+        print("=" * 60)
+        print("DERIV MARKET DATA TEST PASSED")
+        print("=" * 60)
+        print()
+        print(
+            f"Using actual active symbol: {symbol}"
         )
         print(
-            "No live orders are submitted by this version."
+            "Ticks: OK"
+        )
+        print(
+            "Candles: OK"
         )
         print()
 
         # Keep Render worker alive.
-        print("Bot is staying online...")
-
         while True:
             await asyncio.sleep(60)
 
-    except asyncio.TimeoutError:
-        print()
-        print(
-            "ERROR: Timed out waiting for Deriv tick data."
-        )
-
-        raise
-
     except Exception as exc:
         print()
-        print(
-            f"ERROR: {exc}"
-        )
-
+        print("=" * 60)
+        print("ERROR")
+        print("=" * 60)
+        print(exc)
         print()
-        print("Full traceback:")
         traceback.print_exc()
 
         raise
 
     finally:
         await client.close()
-        print("Deriv WebSocket closed.")
 
 
 if __name__ == "__main__":
