@@ -1,115 +1,202 @@
 import asyncio
-import os
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from config import Settings
+import traceback
+
+from config import settings
 from client import DerivClient
-from engine import analyze
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/health"):
-            body = b"Arshe Trading Bot is running"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
 
-    def log_message(self, format, *args):
-        return
+async def run():
+    print("=" * 60)
+    print("ARSHE TRADING BOT")
+    print("Deriv market-analysis engine")
+    print("=" * 60)
 
-def start_health_server():
-    port = int(os.getenv("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+    print(f"WebSocket: {settings.deriv_ws_url}")
+    print(f"Requested symbol: {settings.symbol}")
+    print(f"Timeframes: {settings.timeframes}")
+    print(f"History count: {settings.history_count}")
+    print(f"Minimum confidence: {settings.min_confidence}")
+    print()
 
-def print_analysis(symbol, timeframe, result):
-    print("\n" + "━" * 64)
-    print(f"ARSHE TRADING BOT | {symbol} | {timeframe}s")
-    print("━" * 64)
-    print(f"BIAS:        {result.bias}")
-    print(f"STRUCTURE:   {result.structure}")
-    print(f"LIQUIDITY:   {result.liquidity}")
-    print(f"FVG:         {result.fvg}")
-    print(f"DISPLACEMENT:{' YES' if result.displacement else ' NO'}")
-    print(f"CONFLUENCE:  {result.score}/100")
-    print(f"SIGNAL:      {result.signal}")
-    if result.reasons:
-        print("REASONS:")
-        for x in result.reasons:
-            print(f"  ✓ {x}")
-    if result.warnings:
-        print("WARNINGS:")
-        for x in result.warnings:
-            print(f"  ! {x}")
-
-async def main():
-    threading.Thread(target=start_health_server, daemon=True).start()
-    settings = Settings()
-    client = DerivClient(settings.ws_url, settings.app_id)
-
-    print("Connecting to Deriv market data...")
-    await client.connect()
-    print("Connected.")
-
-    # Build initial multi-timeframe snapshots.
-    snapshots = {}
-    for tf in settings.timeframes:
-        candles = await client.candles(
-            settings.symbol, tf, settings.history_count
-        )
-        snapshots[tf] = candles
-        result = analyze(candles, settings.min_confidence)
-        print_analysis(settings.symbol, tf, result)
-
-    # Subscribe to each timeframe. The v1 bot logs incoming updates.
-    for tf in settings.timeframes:
-        await client.subscribe_candles(settings.symbol, tf)
-
-    print("\nLive stream active. Press Ctrl+C to stop.\n")
+    client = DerivClient(
+        settings.deriv_ws_url,
+        settings.deriv_app_id,
+    )
 
     try:
-        async for message in client.stream():
-            if message.get("msg_type") != "ohlc":
-                continue
+        # ---------------------------------------------------------
+        # 1. CONNECT
+        # ---------------------------------------------------------
+        print("Connecting to Deriv market data...")
 
-            o = message.get("ohlc", {})
-            tf = int(o.get("granularity", 0))
-            if tf not in snapshots:
-                continue
+        await client.connect()
 
-            candle = {
-                "epoch": int(o["epoch"]),
-                "open": float(o["open"]),
-                "high": float(o["high"]),
-                "low": float(o["low"]),
-                "close": float(o["close"]),
-                "granularity": tf,
-            }
+        print("Connected to Deriv WebSocket.")
+        print()
 
-            candles = snapshots[tf]
-            if candles and candles[-1]["epoch"] == candle["epoch"]:
-                candles[-1] = candle
-            else:
-                candles.append(candle)
-                del candles[:-settings.history_count]
+        # ---------------------------------------------------------
+        # 2. GET ACTIVE SYMBOLS
+        # ---------------------------------------------------------
+        print("Checking Deriv active symbols...")
 
-            # Analyze on each incoming candle update.
-            result = analyze(candles, settings.min_confidence)
-            print_analysis(settings.symbol, tf, result)
+        symbols = await client.active_symbols()
+
+        print(
+            f"Received {len(symbols)} active symbols."
+        )
+
+        if symbols:
+            print("Sample active symbols:")
+
+            shown = 0
+
+            for item in symbols:
+                symbol = (
+                    item.get("underlying_symbol")
+                    or item.get("symbol")
+                    or ""
+                )
+
+                name = (
+                    item.get("underlying_symbol_name")
+                    or item.get("display_name")
+                    or ""
+                )
+
+                if symbol:
+                    print(
+                        f"  {symbol}"
+                        + (f" - {name}" if name else "")
+                    )
+
+                    shown += 1
+
+                    if shown >= 10:
+                        break
+
+        print()
+
+        # ---------------------------------------------------------
+        # 3. RESOLVE SYMBOL
+        # ---------------------------------------------------------
+        symbol = await client.resolve_symbol(
+            settings.symbol
+        )
+
+        print()
+        print(f"Using symbol: {symbol}")
+        print()
+
+        # ---------------------------------------------------------
+        # 4. TEST TICK DATA
+        # ---------------------------------------------------------
+        print("Testing live tick data...")
+
+        async with asyncio.timeout(15):
+            async for message in client.stream_ticks(symbol):
+
+                if message.get("msg_type") == "tick":
+                    tick = message.get("tick", {})
+
+                    quote = tick.get("quote")
+                    epoch = tick.get("epoch")
+
+                    print(
+                        f"Live tick: {quote} "
+                        f"(epoch={epoch})"
+                    )
+
+                    break
+
+        print("Live tick stream is working.")
+        print()
+
+        # ---------------------------------------------------------
+        # 5. GET HISTORICAL CANDLES
+        # ---------------------------------------------------------
+        print("Downloading historical candles...")
+
+        for timeframe in settings.timeframes:
+
+            print(
+                f"Fetching {timeframe}-second candles..."
+            )
+
+            candles = await client.candles(
+                symbol=symbol,
+                granularity=timeframe,
+                count=settings.history_count,
+            )
+
+            print(
+                f"Received {len(candles)} candles "
+                f"for {timeframe}s timeframe."
+            )
+
+            if candles:
+                latest = candles[-1]
+
+                print(
+                    f"Latest candle: "
+                    f"O={latest['open']} "
+                    f"H={latest['high']} "
+                    f"L={latest['low']} "
+                    f"C={latest['close']}"
+                )
+
+            print()
+
+        # ---------------------------------------------------------
+        # 6. BOT STATUS
+        # ---------------------------------------------------------
+        print("=" * 60)
+        print("DERIV CONNECTION TEST PASSED")
+        print("=" * 60)
+        print()
+        print(f"Symbol: {symbol}")
+        print("WebSocket: OK")
+        print("Active symbols: OK")
+        print("Ticks: OK")
+        print("Historical candles: OK")
+        print()
+        print(
+            "The market-data engine is ready."
+        )
+        print(
+            "No live orders are submitted by this version."
+        )
+        print()
+
+        # Keep Render worker alive.
+        print("Bot is staying online...")
+
+        while True:
+            await asyncio.sleep(60)
+
+    except asyncio.TimeoutError:
+        print()
+        print(
+            "ERROR: Timed out waiting for Deriv tick data."
+        )
+
+        raise
+
+    except Exception as exc:
+        print()
+        print(
+            f"ERROR: {exc}"
+        )
+
+        print()
+        print("Full traceback:")
+        traceback.print_exc()
+
+        raise
 
     finally:
         await client.close()
+        print("Deriv WebSocket closed.")
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    except Exception as exc:
-        print(f"\nERROR: {exc}")
-        print("If this is a Deriv connection error, paste the exact message here.")
+    asyncio.run(run())
