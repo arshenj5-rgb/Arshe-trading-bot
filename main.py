@@ -2,9 +2,9 @@ import asyncio
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from bot.config import Settings
-from bot.deriv.client import DerivClient
-from bot.analysis.engine import analyze
+from config import Settings
+from client import DerivClient
+from engine import analyze
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
