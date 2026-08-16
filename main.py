@@ -1,7 +1,31 @@
 import asyncio
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from bot.config import Settings
 from bot.deriv.client import DerivClient
 from bot.analysis.engine import analyze
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            body = b"Arshe Trading Bot is running"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 def print_analysis(symbol, timeframe, result):
     print("\n" + "━" * 64)
@@ -24,6 +48,7 @@ def print_analysis(symbol, timeframe, result):
             print(f"  ! {x}")
 
 async def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
     settings = Settings()
     client = DerivClient(settings.ws_url, settings.app_id)
 
