@@ -7,34 +7,30 @@ load_dotenv()
 
 @dataclass
 class Settings:
-    ws_url: str = os.getenv(
+    # Public Deriv market-data WebSocket.
+    deriv_ws_url: str = os.getenv(
         "DERIV_WS_URL",
-        "wss://ws.derivws.com/websockets/v3"
+        "wss://ws.binaryws.com/websockets/v3"
     )
 
-    app_id: str = os.getenv(
-        "DERIV_APP_ID",
-        "1089"
-    )
+    # App ID is NOT required for public market data.
+    deriv_app_id: str = os.getenv("DERIV_APP_ID", "")
 
-    symbol: str = os.getenv(
-        "SYMBOL",
-        "1HZ100V"
-    )
+    # Default market.
+    symbol: str = os.getenv("SYMBOL", "1HZ100V")
 
+    # Timeframes in seconds.
     timeframes: tuple[int, ...] = tuple(
         int(x.strip())
-        for x in os.getenv(
-            "TIMEFRAMES",
-            "60,300,900,3600"
-        ).split(",")
+        for x in os.getenv("TIMEFRAMES", "60,300,900,3600").split(",")
         if x.strip()
     )
 
-    history_count: int = int(
-        os.getenv("HISTORY_COUNT", "300")
-    )
+    history_count: int = int(os.getenv("HISTORY_COUNT", "300"))
 
     min_confidence: int = int(
         os.getenv("MIN_CONFIDENCE", "70")
     )
+
+
+settings = Settings()
