@@ -1,89 +1,80 @@
 import asyncio
 import json
+from typing import Any
+
 import websockets
 
 
 class DerivClient:
-
     def __init__(self, url: str, app_id: str = ""):
-        self.base_url = url
-        self.app_id = app_id
+        self.url = url
 
-        if app_id:
-            separator = "&" if "?" in url else "?"
-            self.full_url = f"{url}{separator}app_id={app_id}"
-        else:
-            self.full_url = url
+        # Keep compatibility with old deployments.
+        if app_id and "app_id=" not in url:
+            self.url = f"{url}?app_id={app_id}"
 
         self.ws = None
         self.req_id = 0
-        self.active_symbols = []
-        self.selected_symbol = None
-
-    # ---------------------------------------------------------
-    # CONNECTION
-    # ---------------------------------------------------------
 
     async def connect(self):
+        if self.ws is not None:
+            return
+
         self.ws = await websockets.connect(
-            self.full_url,
+            self.url,
             ping_interval=20,
             ping_timeout=20,
-            close_timeout=5
+            close_timeout=5,
+            max_size=10 * 1024 * 1024,
         )
 
-        print("Connected to Deriv WebSocket.")
-        print(f"Endpoint: {self.full_url}")
-
     async def close(self):
-        if self.ws:
-            await self.ws.close()
-            self.ws = None
+        if self.ws is not None:
+            try:
+                await self.ws.close()
+            finally:
+                self.ws = None
 
-    # ---------------------------------------------------------
-    # GENERIC REQUEST
-    # ---------------------------------------------------------
-
-    async def request(self, payload: dict) -> dict:
-
-        if not self.ws:
+    async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.ws is None:
             raise RuntimeError("WebSocket is not connected")
 
         self.req_id += 1
 
-        request = {
-            **payload,
-            "req_id": self.req_id
-        }
+        request = dict(payload)
+        request["req_id"] = self.req_id
 
         await self.ws.send(json.dumps(request))
 
         while True:
-
             raw = await self.ws.recv()
-
-            message = json.loads(raw)
+            msg = json.loads(raw)
 
             # Ignore unrelated subscription messages.
-            if message.get("req_id") != self.req_id:
+            if msg.get("req_id") != self.req_id:
                 continue
 
-            if "error" in message:
-                error = message["error"]
+            if "error" in msg:
+                error = msg["error"]
+                code = error.get("code", "UnknownError")
+                message = error.get("message", "Unknown Deriv error")
 
                 raise RuntimeError(
-                    f"Deriv error "
-                    f"{error.get('code')}: "
-                    f"{error.get('message')}"
+                    f"Deriv error {code}: {message}"
                 )
 
-            return message
+            return msg
 
-    # ---------------------------------------------------------
-    # ACTIVE SYMBOLS
-    # ---------------------------------------------------------
+    async def active_symbols(self) -> list[dict[str, Any]]:
+        """
+        Get all active Deriv symbols.
 
-    async def get_active_symbols(self):
+        Current Deriv API returns:
+            underlying_symbol
+
+        Older API versions returned:
+            symbol
+        """
 
         response = await self.request({
             "active_symbols": "brief"
@@ -91,163 +82,77 @@ class DerivClient:
 
         symbols = response.get("active_symbols", [])
 
-        self.active_symbols = symbols
-
-        print()
-        print("========================================")
-        print("DERIV ACTIVE SYMBOLS")
-        print("========================================")
-        print(f"Received {len(symbols)} active symbols.")
+        if not isinstance(symbols, list):
+            raise RuntimeError(
+                "Deriv returned an invalid active_symbols response."
+            )
 
         return symbols
 
-    # ---------------------------------------------------------
-    # SYMBOL RESOLUTION
-    # ---------------------------------------------------------
+    async def resolve_symbol(self, requested_symbol: str) -> str:
+        """
+        Resolve a symbol against Deriv's current active-symbol list.
 
-    async def resolve_symbol(self, requested_symbol: str):
+        Supports both:
+            underlying_symbol  (new API)
+            symbol             (legacy API)
+        """
 
-        symbols = await self.get_active_symbols()
+        requested = requested_symbol.strip().upper()
 
-        if not symbols:
-            raise RuntimeError(
-                "Deriv returned no active symbols."
-            )
+        symbols = await self.active_symbols()
 
-        # Build a lookup using the CURRENT Deriv API field.
-        lookup = {}
+        print(f"Deriv returned {len(symbols)} active symbols.")
 
+        # First look for an exact match.
         for item in symbols:
-
-            symbol = item.get("underlying_symbol")
-
-            if symbol:
-                lookup[symbol.upper()] = item
-
-        requested = requested_symbol.upper()
-
-        # -----------------------------------------------------
-        # 1. Requested symbol is available
-        # -----------------------------------------------------
-
-        if requested in lookup:
-
-            selected = requested
-
-            print()
-            print(f"Requested symbol is ACTIVE: {selected}")
-
-            self.selected_symbol = selected
-
-            return selected
-
-        # -----------------------------------------------------
-        # 2. Try common Volatility symbols
-        # -----------------------------------------------------
-
-        preferred_symbols = [
-            "1HZ10V",
-            "1HZ25V",
-            "1HZ50V",
-            "1HZ75V",
-            "1HZ100V",
-            "1HZ150V",
-            "1HZ200V",
-            "R_10",
-            "R_25",
-            "R_50",
-            "R_75",
-            "R_100",
-        ]
-
-        for candidate in preferred_symbols:
-
-            if candidate in lookup:
-
-                print()
-                print(
-                    f"Requested symbol {requested_symbol} "
-                    f"is unavailable."
-                )
-
-                print(
-                    f"Automatically switching to: {candidate}"
-                )
-
-                self.selected_symbol = candidate
-
-                return candidate
-
-        # -----------------------------------------------------
-        # 3. Search synthetic / volatility markets
-        # -----------------------------------------------------
-
-        candidates = []
-
-        for item in symbols:
-
-            symbol = item.get("underlying_symbol", "")
-            name = item.get("underlying_symbol_name", "")
-            market = item.get("market", "")
-            subgroup = item.get("subgroup", "")
-
-            text = (
-                f"{symbol} "
-                f"{name} "
-                f"{market} "
-                f"{subgroup}"
-            ).lower()
-
-            if (
-                "synthetic" in text
-                or "volatility" in text
-                or symbol.startswith("1HZ")
-                or symbol.startswith("R_")
-            ):
-                candidates.append(item)
-
-        if candidates:
-
-            selected_item = candidates[0]
-
-            selected = selected_item.get(
-                "underlying_symbol"
+            symbol = (
+                item.get("underlying_symbol")
+                or item.get("symbol")
+                or ""
             )
 
-            print()
-            print(
-                f"Automatically selected available "
-                f"synthetic symbol: {selected}"
-            )
+            if str(symbol).upper() == requested:
+                print(
+                    f"Confirmed active symbol: {symbol}"
+                )
+                return str(symbol)
 
-            self.selected_symbol = selected
-
-            return selected
-
-        # -----------------------------------------------------
-        # 4. Nothing suitable found
-        # -----------------------------------------------------
-
-        sample = list(lookup.keys())[:20]
-
-        raise RuntimeError(
-            "Could not find a suitable active Deriv symbol. "
-            f"Available symbols include: {sample}"
+        # If the symbol isn't in active_symbols, don't immediately
+        # kill the bot. Try the symbol directly with ticks_history.
+        print(
+            f"Symbol {requested} was not found in active_symbols."
+        )
+        print(
+            "Testing the requested symbol directly with ticks_history..."
         )
 
-    # ---------------------------------------------------------
-    # CANDLES
-    # ---------------------------------------------------------
+        try:
+            await self.request({
+                "ticks_history": requested,
+                "count": 1,
+                "end": "latest",
+                "style": "ticks",
+            })
+
+            print(
+                f"Confirmed symbol is usable: {requested}"
+            )
+
+            return requested
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Deriv could not validate symbol '{requested}'. "
+                f"Original error: {exc}"
+            ) from exc
 
     async def candles(
         self,
         symbol: str,
         granularity: int,
-        count: int = 300
-    ):
-
-        # Automatically resolve unavailable symbols.
-        symbol = await self.resolve_symbol(symbol)
+        count: int = 300,
+    ) -> list[dict[str, Any]]:
 
         response = await self.request({
             "ticks_history": symbol,
@@ -255,10 +160,14 @@ class DerivClient:
             "granularity": granularity,
             "count": count,
             "end": "latest",
-            "subscribe": 0
         })
 
         candles = response.get("candles", [])
+
+        if not isinstance(candles, list):
+            raise RuntimeError(
+                "Deriv returned an invalid candles response."
+            )
 
         return [
             {
@@ -267,27 +176,17 @@ class DerivClient:
                 "high": float(c["high"]),
                 "low": float(c["low"]),
                 "close": float(c["close"]),
-                "granularity": granularity
             }
             for c in candles
         ]
 
-    # ---------------------------------------------------------
-    # LIVE CANDLE SUBSCRIPTION
-    # ---------------------------------------------------------
-
     async def subscribe_candles(
         self,
         symbol: str,
-        granularity: int
+        granularity: int,
     ):
-
-        symbol = await self.resolve_symbol(symbol)
-
-        if not self.ws:
-            raise RuntimeError(
-                "WebSocket is not connected"
-            )
+        if self.ws is None:
+            raise RuntimeError("WebSocket is not connected")
 
         self.req_id += 1
 
@@ -298,53 +197,51 @@ class DerivClient:
             "count": 1,
             "end": "latest",
             "subscribe": 1,
-            "req_id": self.req_id
+            "req_id": self.req_id,
         }
 
-        await self.ws.send(
-            json.dumps(request)
-        )
+        await self.ws.send(json.dumps(request))
 
-        # First response is the current candle snapshot.
         while True:
-
             raw = await self.ws.recv()
+            msg = json.loads(raw)
 
-            message = json.loads(raw)
-
-            if message.get("req_id") != self.req_id:
-                continue
-
-            if "error" in message:
-
-                error = message["error"]
+            if msg.get("error"):
+                error = msg["error"]
 
                 raise RuntimeError(
                     f"Deriv error "
-                    f"{error.get('code')}: "
-                    f"{error.get('message')}"
+                    f"{error.get('code', 'Unknown')}: "
+                    f"{error.get('message', 'Unknown error')}"
                 )
 
-            break
+            yield msg
 
-        print(
-            f"Live candle stream started: "
-            f"{symbol} / {granularity}s"
-        )
+    async def stream_ticks(self, symbol: str):
+        if self.ws is None:
+            raise RuntimeError("WebSocket is not connected")
 
-    # ---------------------------------------------------------
-    # RAW LIVE STREAM
-    # ---------------------------------------------------------
+        self.req_id += 1
 
-    async def stream(self):
+        request = {
+            "ticks": symbol,
+            "subscribe": 1,
+            "req_id": self.req_id,
+        }
 
-        if not self.ws:
-            raise RuntimeError(
-                "WebSocket is not connected"
-            )
+        await self.ws.send(json.dumps(request))
 
         while True:
-
             raw = await self.ws.recv()
+            msg = json.loads(raw)
 
-            yield json.loads(raw)
+            if msg.get("error"):
+                error = msg["error"]
+
+                raise RuntimeError(
+                    f"Deriv error "
+                    f"{error.get('code', 'Unknown')}: "
+                    f"{error.get('message', 'Unknown error')}"
+                )
+
+            yield msg
