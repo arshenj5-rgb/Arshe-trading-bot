@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+
 
 @dataclass
 class Analysis:
@@ -13,23 +13,29 @@ class Analysis:
     displacement: bool
     signal: str
 
+
 def _swing_points(candles, left=2, right=2):
     highs, lows = [], []
-    for i in range(left, len(candles)-right):
+    for i in range(left, len(candles) - right):
         h = candles[i]["high"]
         l = candles[i]["low"]
-        if all(h > candles[j]["high"] for j in range(i-left, i)) and \
-           all(h >= candles[j]["high"] for j in range(i+1, i+right+1)):
+        if all(h > candles[j]["high"] for j in range(i - left, i)) and all(
+            h >= candles[j]["high"] for j in range(i + 1, i + right + 1)
+        ):
             highs.append((i, h))
-        if all(l < candles[j]["low"] for j in range(i-left, i)) and \
-           all(l <= candles[j]["low"] for j in range(i+1, i+right+1)):
+        if all(l < candles[j]["low"] for j in range(i - left, i)) and all(
+            l <= candles[j]["low"] for j in range(i + 1, i + right + 1)
+        ):
             lows.append((i, l))
     return highs, lows
 
+
 def analyze(candles: list[dict], min_confidence: int = 70) -> Analysis:
     if len(candles) < 40:
-        return Analysis("UNKNOWN", 0, [], ["Not enough candles"], "UNKNOWN",
-                        "UNKNOWN", "UNKNOWN", False, "WAIT")
+        return Analysis(
+            "UNKNOWN", 0, [], ["Not enough candles"], "UNKNOWN",
+            "UNKNOWN", "UNKNOWN", False, "WAIT"
+        )
 
     recent = candles[-30:]
     highs, lows = _swing_points(recent)
@@ -54,17 +60,14 @@ def analyze(candles: list[dict], min_confidence: int = 70) -> Analysis:
             warnings.append("Structure is mixed")
 
     last = recent[-1]
-    prev = recent[-2]
     rng = max(last["high"] - last["low"], 1e-12)
     body = abs(last["close"] - last["open"])
-    displacement = body / rng >= 0.70 and rng > (
-        sum(c["high"] - c["low"] for c in recent[-10:-1]) / 9
-    ) * 1.35
+    avg_range = sum(c["high"] - c["low"] for c in recent[-10:-1]) / 9
+    displacement = body / rng >= 0.70 and rng > avg_range * 1.35
     if displacement:
         score += 10
         reasons.append("Displacement candle detected")
 
-    # Liquidity sweep: current candle takes prior local extreme and closes back inside.
     prior_high = max(c["high"] for c in recent[-8:-1])
     prior_low = min(c["low"] for c in recent[-8:-1])
     sweep = "NONE"
@@ -77,10 +80,9 @@ def analyze(candles: list[dict], min_confidence: int = 70) -> Analysis:
         score += 10
         reasons.append("Sell-side liquidity sweep")
 
-    # Simple 3-candle FVG approximation.
     fvg = "NONE"
     if len(recent) >= 3:
-        a, b, c = recent[-3:]
+        a, _, c = recent[-3:]
         if a["high"] < c["low"]:
             fvg = "BULLISH FVG"
             score += 5
@@ -96,7 +98,6 @@ def analyze(candles: list[dict], min_confidence: int = 70) -> Analysis:
         warnings.append("No clear directional structure")
 
     score = max(0, min(100, score))
-
     if score >= min_confidence:
         signal = "BUY" if bias == "BULLISH" else "SELL" if bias == "BEARISH" else "WAIT"
     else:

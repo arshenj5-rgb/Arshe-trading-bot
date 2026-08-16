@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: arshe-trading-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m bot.main
+    healthCheckPath: /health

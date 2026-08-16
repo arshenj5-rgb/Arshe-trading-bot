@@ -43,12 +43,10 @@ def print_analysis(symbol, timeframe, result):
     print(f"DISPLACEMENT: {'YES' if result.displacement else 'NO'}")
     print(f"CONFLUENCE:   {result.score}/100")
     print(f"SIGNAL:       {result.signal}")
-
     if result.reasons:
         print("REASONS:")
         for item in result.reasons:
             print(f"  + {item}")
-
     if result.warnings:
         print("WARNINGS:")
         for item in result.warnings:
@@ -57,46 +55,34 @@ def print_analysis(symbol, timeframe, result):
 
 async def main():
     threading.Thread(target=start_health_server, daemon=True).start()
-
     settings = Settings()
     client = DerivClient(settings.ws_url)
 
-    print()
-    print("=" * 64)
-    print("              ARSHE TRADING BOT V1")
+    print("\n" + "=" * 64)
+    print("              ARSHE TRADING BOT V2")
     print("=" * 64)
     print(f"Requested symbol: {settings.symbol}")
     print("Timeframes: " + ", ".join(map(str, settings.timeframes)))
+    print("Market mode: PUBLIC DATA / ANALYSIS ONLY")
     print("=" * 64)
 
     try:
         await client.connect()
-
-        # IMPORTANT: ask Deriv for the current symbols first.
         symbol = await client.resolve_symbol(settings.symbol)
 
         snapshots: dict[int, list[dict]] = {}
-
         for tf in settings.timeframes:
             print(f"\nDownloading {settings.history_count} candles for {symbol} / {tf}s...")
-            candles = await client.candles(
-                symbol,
-                tf,
-                settings.history_count,
-            )
-
+            candles = await client.candles(symbol, tf, settings.history_count)
             if len(candles) < 40:
                 print(f"WARNING: only {len(candles)} candles received for {tf}s.")
                 continue
-
             snapshots[tf] = candles
-            result = analyze(candles, settings.min_confidence)
-            print_analysis(symbol, tf, result)
+            print_analysis(symbol, tf, analyze(candles, settings.min_confidence))
 
         if not snapshots:
-            raise RuntimeError("Deriv returned no usable candle history.")
+            raise RuntimeError("Deriv returned no usable candle history for the selected symbol.")
 
-        # Subscribe after all historical requests have completed.
         for tf in snapshots:
             await client.subscribe_candles(symbol, tf)
             print(f"Live candle subscription active: {tf}s")
@@ -105,13 +91,9 @@ async def main():
 
         async for message in client.stream():
             if message.get("error"):
-                error = message["error"]
-                print(
-                    f"Deriv stream error {error.get('code')}: "
-                    f"{error.get('message')}"
-                )
+                error = message["error"] or {}
+                print(f"Deriv stream error {error.get('code')}: {error.get('message')}")
                 continue
-
             if message.get("msg_type") != "ohlc":
                 continue
 
@@ -119,7 +101,7 @@ async def main():
             try:
                 tf = int(o["granularity"])
                 candle = {
-                    "epoch": int(o["open_time"] if "open_time" in o else o["epoch"]),
+                    "epoch": int(o.get("open_time", o.get("epoch"))),
                     "open": float(o["open"]),
                     "high": float(o["high"]),
                     "low": float(o["low"]),
@@ -131,7 +113,6 @@ async def main():
 
             if tf not in snapshots:
                 continue
-
             candles = snapshots[tf]
             if candles and candles[-1]["epoch"] == candle["epoch"]:
                 candles[-1] = candle
@@ -140,8 +121,7 @@ async def main():
                 if len(candles) > settings.history_count:
                     del candles[:-settings.history_count]
 
-            result = analyze(candles, settings.min_confidence)
-            print_analysis(symbol, tf, result)
+            print_analysis(symbol, tf, analyze(candles, settings.min_confidence))
 
     finally:
         await client.close()
