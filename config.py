@@ -17,7 +17,7 @@ class Settings:
     deriv_app_id: str = os.getenv("DERIV_APP_ID", "")
 
     # Default market.
-    symbol: str = os.getenv("SYMBOL", "1HZ100V")
+    symbol: str = os.getenv("SYMBOL", "")
 
     # Timeframes in seconds.
     timeframes: tuple[int, ...] = tuple(
